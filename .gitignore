@@ -1,0 +1,13 @@
+# Node
+node_modules/
+dist/
+
+# Go
+/bin/
+*.exe
+
+# Docker
+.env
+
+# OS
+.DS_Store
