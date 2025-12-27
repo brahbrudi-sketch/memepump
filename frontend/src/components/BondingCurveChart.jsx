@@ -126,7 +126,7 @@ function BondingCurveChart({
                         axisLine={{ stroke: '#475569' }}
                         width={60}
                     />
-                    <Tooltip content={<CustomTooltip />} />
+                    <Tooltip content={renderTooltip} />
 
                     {/* Graduation line */}
                     {graduationPoint && (

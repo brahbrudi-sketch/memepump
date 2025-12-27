@@ -159,7 +159,7 @@ export function useWallet() {
             const { signature } = await provider.signMessage(encodedMessage, 'utf8');
 
             return {
-                signature: Buffer.from(signature).toString('base64'),
+                signature: btoa(String.fromCharCode.apply(null, Array.from(signature))),
                 message,
                 address: wallet
             };
