@@ -13,7 +13,7 @@ import TradeHistoryModal from './components/modals/TradeHistoryModal';
 import ActivityTicker from './components/ActivityTicker';
 
 const API_URL = 'http://localhost:8080/api/v1';
-const WS_URL = 'ws://localhost:8080/ws';
+const WS_URL = 'ws://localhost:8080/api/v1/ws';
 
 function App() {
   const [coins, setCoins] = useState([]);

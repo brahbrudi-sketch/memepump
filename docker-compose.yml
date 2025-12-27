@@ -1,10 +1,26 @@
-version: "3.9"
-
 services:
   backend:
     build: ./backend
     ports:
       - "8080:8080"
+    environment:
+      - DB_HOST=db
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=memepump
+      - DB_PORT=5432
+      - REDIS_ADDR=redis:6379
+      - JWT_SECRET=change_this_secret_in_prod
+      # Blockchain & IPFS Configuration (set in .env or CI/CD)
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      - SOLANA_WS_URL=${SOLANA_WS_URL:-wss://api.devnet.solana.com}
+      - PINATA_API_KEY=${PINATA_API_KEY:-}
+      - PINATA_SECRET_KEY=${PINATA_SECRET_KEY:-}
+      - IPFS_GATEWAY=${IPFS_GATEWAY:-https://gateway.pinata.cloud/ipfs}
+    depends_on:
+      - db
+      - redis
+    restart: always
 
   frontend:
     build: ./frontend
@@ -12,3 +28,27 @@ services:
       - "5173:80"
     depends_on:
       - backend
+
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=memepump
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:

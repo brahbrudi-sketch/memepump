@@ -5,157 +5,67 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"time"
+
+	"memepump/auth"
+	"memepump/database"
+	"memepump/handlers"
+	"memepump/middleware"
+	"memepump/models"
+	"memepump/realtime"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// Models
-type Coin struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Symbol      string    `json:"symbol"`
-	Description string    `json:"description"`
-	Image       string    `json:"image"`
-	Creator     string    `json:"creator"`
-	Twitter     string    `json:"twitter"`
-	Telegram    string    `json:"telegram"`
-	Website     string    `json:"website"`
-	MarketCap   float64   `json:"marketCap"`
-	Progress    float64   `json:"progress"`
-	TotalSupply float64   `json:"totalSupply"`
-	Price       float64   `json:"price"`
-	CreatedAt   time.Time `json:"createdAt"`
-	Holders     int       `json:"holders"`
+// Config
+var (
+	PORT       = os.Getenv("PORT")
+	DB_DSN     string
+	REDIS_ADDR = os.Getenv("REDIS_ADDR")
+)
+
+func init() {
+	if PORT == "" {
+		PORT = "8080"
+	}
+
+	host := os.Getenv("DB_HOST")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+	dbname := os.Getenv("DB_NAME")
+	port := os.Getenv("DB_PORT")
+
+	if host != "" {
+		DB_DSN = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=UTC", host, user, password, dbname, port)
+	} else {
+		// Fallback for local dev if envs missing (e.g. running go run main.go directly)
+		DB_DSN = "host=localhost user=postgres password=postgres dbname=memepump port=5432 sslmode=disable TimeZone=UTC"
+	}
+
+	if REDIS_ADDR == "" {
+		REDIS_ADDR = "localhost:6379"
+	}
 }
 
-type Trade struct {
-	ID        string    `json:"id"`
-	CoinID    string    `json:"coinId"`
-	Type      string    `json:"type"`
-	Amount    float64   `json:"amount"`
-	Price     float64   `json:"price"`
-	Wallet    string    `json:"wallet"`
-	Username  string    `json:"username"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-type Comment struct {
-	ID        string    `json:"id"`
-	CoinID    string    `json:"coinId"`
-	UserID    string    `json:"userId"`
-	Username  string    `json:"username"`
-	Avatar    string    `json:"avatar"`
-	Content   string    `json:"content"`
-	Likes     int       `json:"likes"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-type User struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Avatar    string    `json:"avatar"`
-	Bio       string    `json:"bio"`
-	Pin       string    `json:"pin"` // Simple security code
-	Twitter   string    `json:"twitter"`
-	Telegram  string    `json:"telegram"`
-	Website   string    `json:"website"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
-type CreateCoinRequest struct {
-	Name             string  `json:"name" binding:"required"`
-	Symbol           string  `json:"symbol" binding:"required"`
-	Description      string  `json:"description" binding:"required"`
-	Image            string  `json:"image" binding:"required"`
-	Creator          string  `json:"creator" binding:"required"`
-	Twitter          string  `json:"twitter"`
-	Telegram         string  `json:"telegram"`
-	Website          string  `json:"website"`
-	InitialBuyAmount float64 `json:"initialBuyAmount"`
-}
-
-type TradeRequest struct {
-	CoinID   string  `json:"coinId" binding:"required"`
-	Type     string  `json:"type" binding:"required"`
-	Amount   float64 `json:"amount" binding:"required"`
-	Wallet   string  `json:"wallet" binding:"required"`
-	Username string  `json:"username"`
-}
-
-type CommentRequest struct {
-	CoinID   string `json:"coinId" binding:"required"`
-	UserID   string `json:"userId" binding:"required"`
-	Username string `json:"username" binding:"required"`
-	Avatar   string `json:"avatar"`
-	Content  string `json:"content" binding:"required"`
-}
-
-type CreateUserRequest struct {
-	Username string `json:"username" binding:"required"`
-	Avatar   string `json:"avatar"`
-	Bio      string `json:"bio"`
-	Pin      string `json:"pin" binding:"required"`
-	Twitter  string `json:"twitter"`
-	Telegram string `json:"telegram"`
-	Website  string `json:"website"`
-}
-
-type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Pin      string `json:"pin" binding:"required"`
-}
-
-type UpdateUserRequest struct {
-	Username string `json:"username"`
-	Avatar   string `json:"avatar"`
-	Bio      string `json:"bio"`
-	Pin      string `json:"pin" binding:"required"` // Current Pin needed to update
-	Twitter  string `json:"twitter"`
-	Telegram string `json:"telegram"`
-	Website  string `json:"website"`
-}
-
-// WebSocket
+// WebSocket Upgrader
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
 
-type WSMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
-}
-
-var storage = NewStorage("data.json")
-
-func broadcast(msgType string, data interface{}) {
-	clients := storage.GetClients()
-
-	msg := WSMessage{
-		Type: msgType,
-		Data: data,
-	}
-
-	for _, client := range clients {
-		err := client.WriteJSON(msg)
-		if err != nil {
-			client.Close()
-			storage.RemoveClient(client)
-		}
-	}
-}
-
-// Bonding Curve
+// Bonding Curve Logic
 func calculatePrice(supply float64) float64 {
 	return math.Pow(supply, 2) / 1000000
 }
 
-func calculateMarketCap(coin *Coin) float64 {
+func calculateMarketCap(coin *models.Coin) float64 {
 	return coin.Price * coin.TotalSupply
 }
 
@@ -168,7 +78,69 @@ func calculateProgress(marketCap float64) float64 {
 	return progress
 }
 
+func main() {
+	// Connect to Database
+	database.Connect(DB_DSN)
+
+	// Connect to Redis
+	database.ConnectRedis(REDIS_ADDR, "")
+
+	// Initialize Server
+	r := gin.Default()
+
+	// CORS
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
+	// Health check at root level
+	r.GET("/health", healthCheck)
+
+	// API v1 routes
+	api := r.Group("/api/v1")
+	{
+		// WebSocket
+		api.GET("/ws", handleWebSocket)
+
+		// Public Routes
+		api.POST("/users", createUser)
+		api.POST("/login", loginUser)
+		api.GET("/users/:id", getUser)
+		api.GET("/coins", getCoins)
+		api.GET("/coins/:id", getCoin)
+		api.GET("/trades", getTrades)
+		api.GET("/comments", getComments)
+		api.GET("/users/:id/portfolio", getPortfolio)
+
+		// Protected Routes
+		protected := api.Group("/")
+		protected.Use(middleware.AuthMiddleware())
+		{
+			protected.POST("/coins", middleware.RateLimitMiddleware(), createCoin)
+			protected.POST("/trade", middleware.RateLimitMiddleware(), executeTrade)
+			protected.POST("/comments", middleware.RateLimitMiddleware(), createComment)
+			protected.POST("/comments/:coinId/:commentId/like", likeComment)
+			protected.PUT("/users/:id", updateUser)
+		}
+
+		// Register new professional features (IPFS, Wallet, Analytics)
+		handlers.RegisterRoutes(api, middleware.AuthMiddleware(), middleware.RateLimitMiddleware())
+	}
+
+	// Initialize Mock Data if needed
+	go initMockData()
+
+	log.Printf("Server starting on port %s", PORT)
+	r.Run(":" + PORT)
+}
+
 // Handlers
+
 func handleWebSocket(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -176,463 +148,134 @@ func handleWebSocket(c *gin.Context) {
 		return
 	}
 
-	storage.AddClient(conn)
+	realtime.MainHub.AddClient(conn)
 
-	// Send initial data
-	storage.mu.RLock()
-	coins := make([]*Coin, 0, len(storage.Coins))
-	for _, coin := range storage.Coins {
-		coins = append(coins, coin)
+	// Send initial data (Coins)
+	var coins []models.Coin
+	if result := database.DB.Find(&coins); result.Error == nil {
+		conn.WriteJSON(realtime.WSMessage{Type: "coins", Data: coins})
 	}
-	storage.mu.RUnlock()
-	conn.WriteJSON(WSMessage{Type: "coins", Data: coins})
 
-	defer func() {
-		storage.RemoveClient(conn)
-		conn.Close()
-	}()
-
+	// Keep alive loop
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
+			realtime.MainHub.RemoveClient(conn)
 			break
 		}
 	}
 }
 
-func createCoin(c *gin.Context) {
-	var req CreateCoinRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	if len(req.Name) > 32 || len(req.Symbol) > 10 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Name or Symbol too long"})
-		return
-	}
-	if len(req.Description) > 500 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Description too long"})
-		return
-	}
-
-	coin := &Coin{
-		ID:          uuid.New().String(),
-		Name:        req.Name,
-		Symbol:      req.Symbol,
-		Description: req.Description,
-		Image:       req.Image,
-		Creator:     req.Creator,
-		Twitter:     req.Twitter,
-		Telegram:    req.Telegram,
-		Website:     req.Website,
-		TotalSupply: 1000000000,
-		Price:       0.0001,
-		CreatedAt:   time.Now(),
-		Holders:     1,
-	}
-
-	coin.MarketCap = calculateMarketCap(coin)
-	coin.Progress = calculateProgress(coin.MarketCap)
-
-	storage.mu.Lock()
-	storage.Coins[coin.ID] = coin
-	storage.mu.Unlock()
-
-	// Handle Initial Buy if requested
-	if req.InitialBuyAmount > 0 {
-		storage.mu.Lock()
-		// Get pointer back
-		cPtr := storage.Coins[coin.ID]
-
-		buyAmount := req.InitialBuyAmount
-		newSupply := cPtr.TotalSupply + (buyAmount * 1000000)
-
-		cPtr.TotalSupply = newSupply
-		cPtr.Price = calculatePrice(cPtr.TotalSupply)
-		cPtr.MarketCap = calculateMarketCap(cPtr)
-		cPtr.Progress = calculateProgress(cPtr.MarketCap)
-		// cPtr.Holders is already 1 (creator)
-
-		trade := Trade{
-			ID:        uuid.New().String(),
-			CoinID:    cPtr.ID,
-			Type:      "buy",
-			Amount:    buyAmount,
-			Price:     cPtr.Price,
-			Wallet:    "CREATOR_WALLET",
-			Username:  req.Creator,
-			Timestamp: time.Now(),
-		}
-
-		storage.Trades = append(storage.Trades, trade)
-		storage.mu.Unlock()
-
-		go broadcast("trade", map[string]interface{}{
-			"trade": trade,
-			"coin":  cPtr,
-		})
-	}
-
-	storage.Save()
-	broadcast("coinCreated", coin)
-	c.JSON(http.StatusCreated, coin)
+func healthCheck(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now()})
 }
 
-func getCoins(c *gin.Context) {
-	storage.mu.RLock()
-	defer storage.mu.RUnlock()
-
-	coins := make([]*Coin, 0, len(storage.Coins))
-	for _, coin := range storage.Coins {
-		coins = append(coins, coin)
-	}
-
-	c.JSON(http.StatusOK, coins)
-}
-
-func getCoin(c *gin.Context) {
-	id := c.Param("id")
-
-	storage.mu.RLock()
-	coin, exists := storage.Coins[id]
-	storage.mu.RUnlock()
-
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, coin)
-}
-
-func executeTrade(c *gin.Context) {
-	var req TradeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	if req.Type != "buy" && req.Type != "sell" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trade type"})
-		return
-	}
-
-	storage.mu.Lock()
-	// Lock is held for the entire operation to ensure consistency
-	// Defer unlock is risky if we have multiple return points, but safe here if we unlock before return or defer.
-	// Since we are doing logic inside, let's defer unlock.
-	defer storage.mu.Unlock()
-
-	coin, exists := storage.Coins[req.CoinID]
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
-		return
-	}
-
-	var newSupply float64
-	if req.Type == "buy" {
-		newSupply = coin.TotalSupply + (req.Amount * 1000000)
-	} else {
-		newSupply = coin.TotalSupply - (req.Amount * 1000000)
-		if newSupply < 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient supply"})
-			return
-		}
-	}
-
-	coin.TotalSupply = newSupply
-	coin.Price = calculatePrice(coin.TotalSupply)
-	coin.MarketCap = calculateMarketCap(coin)
-	coin.Progress = calculateProgress(coin.MarketCap)
-
-	trade := Trade{
-		ID:        uuid.New().String(),
-		CoinID:    req.CoinID,
-		Type:      req.Type,
-		Amount:    req.Amount,
-		Price:     coin.Price,
-		Wallet:    req.Wallet,
-		Username:  req.Username,
-		Timestamp: time.Now(),
-	}
-
-	storage.Trades = append(storage.Trades, trade)
-
-	// We are under lock, so we can't call broadcast immediately IF broadcast sends messages that might take time?
-	// No, broadcast iterates clients. It should be fine.
-	// But wait, I need to Save() too.
-	// Save() acquires RLock on storage.
-	// We hold Lock on storage. RLock will block!
-	// DEADLOCK!
-
-	// I must NOT call Save() while holding Lock.
-	// I need to release Lock before calling Save().
-}
-
-// REWRITING executeTrade to be safe
-func executeTradeSafe(c *gin.Context) {
-	var req TradeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	if req.Type != "buy" && req.Type != "sell" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trade type"})
-		return
-	}
-	if req.Amount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Amount must be positive"})
-		return
-	}
-
-	storage.mu.Lock()
-	coin, exists := storage.Coins[req.CoinID]
-	if !exists {
-		storage.mu.Unlock()
-		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
-		return
-	}
-
-	var newSupply float64
-	if req.Type == "buy" {
-		newSupply = coin.TotalSupply + (req.Amount * 1000000)
-	} else {
-		newSupply = coin.TotalSupply - (req.Amount * 1000000)
-		if newSupply < 0 {
-			storage.mu.Unlock()
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient supply"})
-			return
-		}
-	}
-
-	coin.TotalSupply = newSupply
-	coin.Price = calculatePrice(coin.TotalSupply)
-	coin.MarketCap = calculateMarketCap(coin)
-	coin.Progress = calculateProgress(coin.MarketCap)
-
-	trade := Trade{
-		ID:        uuid.New().String(),
-		CoinID:    req.CoinID,
-		Type:      req.Type,
-		Amount:    req.Amount,
-		Price:     coin.Price,
-		Wallet:    req.Wallet,
-		Username:  req.Username,
-		Timestamp: time.Now(),
-	}
-
-	storage.Trades = append(storage.Trades, trade)
-	storage.mu.Unlock()
-
-	storage.Save()
-
-	go broadcast("trade", map[string]interface{}{
-		"trade": trade,
-		"coin":  coin,
-	})
-
-	c.JSON(http.StatusOK, gin.H{
-		"trade": trade,
-		"coin":  coin,
-	})
-}
-
-func getTrades(c *gin.Context) {
-	coinID := c.Query("coinId")
-
-	storage.mu.RLock()
-	defer storage.mu.RUnlock()
-
-	var filteredTrades []Trade
-	for _, trade := range storage.Trades {
-		if coinID == "" || trade.CoinID == coinID {
-			filteredTrades = append(filteredTrades, trade)
-		}
-	}
-
-	// Reverse to show newest first
-	// Optimize: In a real app we would sort, but append order is roughly time order.
-	// Let's just return as is, frontend can reverse.
-
-	c.JSON(http.StatusOK, filteredTrades)
-}
-
-func createComment(c *gin.Context) {
-	var req CommentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	comment := Comment{
-		ID:        uuid.New().String(),
-		CoinID:    req.CoinID,
-		UserID:    req.UserID,
-		Username:  req.Username,
-		Avatar:    req.Avatar,
-		Content:   req.Content,
-		Likes:     0,
-		Timestamp: time.Now(),
-	}
-
-	storage.mu.Lock()
-	storage.Comments[req.CoinID] = append(storage.Comments[req.CoinID], comment)
-	storage.mu.Unlock()
-
-	storage.Save()
-	broadcast("comment", comment)
-	c.JSON(http.StatusCreated, comment)
-}
-
-func getComments(c *gin.Context) {
-	coinID := c.Query("coinId")
-
-	storage.mu.RLock()
-	defer storage.mu.RUnlock()
-
-	comments := storage.Comments[coinID]
-	if comments == nil {
-		comments = []Comment{}
-	}
-
-	c.JSON(http.StatusOK, comments)
-}
-
-// Better implementation of likeComment without defer to allow Save()
-func likeCommentSafe(c *gin.Context) {
-	coinID := c.Param("coinId")
-	commentID := c.Param("commentId")
-
-	storage.mu.Lock()
-	comments := storage.Comments[coinID]
-	var updatedComment *Comment
-
-	for i := range comments {
-		if comments[i].ID == commentID {
-			comments[i].Likes++
-			updatedComment = &comments[i]
-			break
-		}
-	}
-	storage.mu.Unlock()
-
-	if updatedComment == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Comment not found"})
-		return
-	}
-
-	storage.Save()
-	// Broadcast update (re-using comment type, frontend merges it)
-	broadcast("commentUpdate", *updatedComment)
-
-	c.JSON(http.StatusOK, updatedComment)
-}
+// User Handlers
 
 func createUser(c *gin.Context) {
-	var req CreateUserRequest
+	var req models.CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if len(req.Username) > 32 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Username too long"})
+
+	// Hash the PIN
+	hashedPin, err := auth.HashPin(req.Pin)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash PIN"})
 		return
 	}
 
-	var user *User
-
-	// Check if update
-	storage.mu.Lock()
-	var existing *User
-	for _, u := range storage.Users {
-		if u.Username == req.Username {
-			existing = u
-			break
-		}
+	user := models.User{
+		ID:        uuid.New().String(),
+		Username:  req.Username,
+		Pin:       hashedPin,
+		Avatar:    req.Avatar,
+		Bio:       req.Bio,
+		Twitter:   req.Twitter,
+		Telegram:  req.Telegram,
+		Website:   req.Website,
+		CreatedAt: time.Now(),
 	}
 
-	if existing != nil {
-		existing.Avatar = req.Avatar
-		existing.Bio = req.Bio
-		existing.Twitter = req.Twitter
-		existing.Telegram = req.Telegram
-		existing.Website = req.Website
-		user = existing
-	} else {
-		user = &User{
-			ID:        uuid.New().String(),
-			Username:  req.Username,
-			Pin:       req.Pin,
-			Avatar:    req.Avatar,
-			Bio:       req.Bio,
-			Twitter:   req.Twitter,
-			Telegram:  req.Telegram,
-			Website:   req.Website,
-			CreatedAt: time.Now(),
-		}
-		storage.Users[user.ID] = user
+	result := database.DB.Create(&user)
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+		return
 	}
-	storage.mu.Unlock()
 
-	storage.Save()
 	c.JSON(http.StatusCreated, user)
 }
 
 func loginUser(c *gin.Context) {
-	var req LoginRequest
+	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	storage.mu.RLock()
-	defer storage.mu.RUnlock()
-
-	var foundUser *User
-	for _, u := range storage.Users {
-		if u.Username == req.Username {
-			foundUser = u
-			break
-		}
-	}
-
-	if foundUser == nil {
+	var user models.User
+	result := database.DB.Where("username = ?", req.Username).First(&user)
+	if result.Error != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
 		return
 	}
 
-	if foundUser.Pin != req.Pin {
+	// Verify PIN using bcrypt
+	if !auth.VerifyPin(user.Pin, req.Pin) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid PIN"})
 		return
 	}
 
-	c.JSON(http.StatusOK, foundUser)
+	token, err := auth.GenerateToken(user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user":  user,
+	})
+}
+
+func getUser(c *gin.Context) {
+	id := c.Param("id")
+	var user models.User
+	if err := database.DB.First(&user, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+	c.JSON(http.StatusOK, user)
 }
 
 func updateUser(c *gin.Context) {
 	id := c.Param("id")
-	var req UpdateUserRequest
+	authUserID := c.GetString("userID")
+	if id != authUserID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot update other user"})
+		return
+	}
+
+	var req models.UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	storage.mu.Lock()
-	user, exists := storage.Users[id]
-	if !exists {
-		storage.mu.Unlock()
+	var user models.User
+	if err := database.DB.First(&user, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	if user.Pin != req.Pin {
-		storage.mu.Unlock()
+	// Verify current PIN using bcrypt
+	if !auth.VerifyPin(user.Pin, req.Pin) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid PIN"})
 		return
 	}
 
+	// Update fields
 	if req.Avatar != "" {
 		user.Avatar = req.Avatar
 	}
@@ -649,86 +292,314 @@ func updateUser(c *gin.Context) {
 		user.Website = req.Website
 	}
 
-	storage.mu.Unlock()
-	storage.Save()
+	database.DB.Save(&user)
 	c.JSON(http.StatusOK, user)
 }
 
-func getUser(c *gin.Context) {
-	id := c.Param("id")
+// Coin Handlers
 
-	storage.mu.RLock()
-	user, exists := storage.Users[id]
-	storage.mu.RUnlock()
-
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+func createCoin(c *gin.Context) {
+	var req models.CreateCoinRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, user)
+	coin := models.Coin{
+		ID:          uuid.New().String(),
+		Name:        req.Name,
+		Symbol:      req.Symbol,
+		Description: req.Description,
+		Image:       req.Image,
+		Creator:     req.Creator,
+		Twitter:     req.Twitter,
+		Telegram:    req.Telegram,
+		Website:     req.Website,
+		TotalSupply: 1000000000,
+		Price:       0.0001,
+		CreatedAt:   time.Now(),
+		Holders:     1,
+	}
+
+	coin.MarketCap = calculateMarketCap(&coin)
+	coin.Progress = calculateProgress(coin.MarketCap)
+
+	tx := database.DB.Begin()
+
+	if err := tx.Create(&coin).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create coin"})
+		return
+	}
+
+	// Handle Initial Buy
+	if req.InitialBuyAmount > 0 {
+		var trade models.Trade // Fix: declare type explicitly
+		trade = models.Trade{
+			ID:        uuid.New().String(),
+			CoinID:    coin.ID,
+			Type:      "buy",
+			Amount:    req.InitialBuyAmount,
+			Price:     coin.Price,
+			Wallet:    "CREATOR_WALLET",
+			Username:  req.Creator,
+			Timestamp: time.Now(),
+		}
+
+		// Update Coin Supply
+		coin.TotalSupply += (req.InitialBuyAmount * 1000000)
+		coin.Price = calculatePrice(coin.TotalSupply)
+		coin.MarketCap = calculateMarketCap(&coin)
+		coin.Progress = calculateProgress(coin.MarketCap)
+
+		if err := tx.Save(&coin).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update coin"})
+			return
+		}
+
+		if err := tx.Create(&trade).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create trade"})
+			return
+		}
+
+		// Broadcast trade
+		go realtime.BroadcastSafe("trade", map[string]interface{}{
+			"trade": trade,
+			"coin":  coin,
+		})
+	}
+
+	tx.Commit()
+
+	realtime.BroadcastSafe("coinCreated", coin)
+	c.JSON(http.StatusCreated, coin)
 }
 
-func healthCheck(c *gin.Context) {
+func getCoins(c *gin.Context) {
+	var coins []models.Coin
+	database.DB.Find(&coins)
+	c.JSON(http.StatusOK, coins)
+}
+
+func getCoin(c *gin.Context) {
+	id := c.Param("id")
+	var coin models.Coin
+	if err := database.DB.First(&coin, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
+		return
+	}
+	c.JSON(http.StatusOK, coin)
+}
+
+// Trade Handlers
+
+func executeTrade(c *gin.Context) {
+	var req models.TradeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Amount must be positive"})
+		return
+	}
+
+	tx := database.DB.Begin()
+
+	var coin models.Coin
+	// Lock row for update
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&coin, "id = ?", req.CoinID).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
+		return
+	}
+
+	var newSupply float64
+	if req.Type == "buy" {
+		newSupply = coin.TotalSupply + (req.Amount * 1000000)
+	} else {
+		newSupply = coin.TotalSupply - (req.Amount * 1000000)
+		if newSupply < 0 {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient supply"})
+			return
+		}
+
+		// Optional: Check user balance here if we were enforcing it strictly
+	}
+
+	coin.TotalSupply = newSupply
+	coin.Price = calculatePrice(coin.TotalSupply)
+	coin.MarketCap = calculateMarketCap(&coin)
+	coin.Progress = calculateProgress(coin.MarketCap)
+
+	trade := models.Trade{
+		ID:        uuid.New().String(),
+		CoinID:    req.CoinID,
+		Type:      req.Type,
+		Amount:    req.Amount,
+		Price:     coin.Price,
+		Wallet:    req.Wallet,
+		Username:  req.Username,
+		Timestamp: time.Now(),
+	}
+
+	if err := tx.Save(&coin).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update coin"})
+		return
+	}
+
+	if err := tx.Create(&trade).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create trade"})
+		return
+	}
+
+	tx.Commit()
+
+	go realtime.BroadcastSafe("trade", map[string]interface{}{
+		"trade": trade,
+		"coin":  coin,
+	})
+
 	c.JSON(http.StatusOK, gin.H{
-		"status": "ok",
-		"time":   time.Now(),
+		"trade": trade,
+		"coin":  coin,
 	})
 }
 
-type PortfolioItem struct {
-	Coin     *Coin   `json:"coin"`
-	Amount   float64 `json:"amount"`
-	Value    float64 `json:"value"`
-	AvgPrice float64 `json:"avgPrice"`
+func getTrades(c *gin.Context) {
+	coinID := c.Query("coinId")
+	var trades []models.Trade
+
+	query := database.DB.Order("timestamp desc")
+	if coinID != "" {
+		query = query.Where("coin_id = ?", coinID)
+	}
+
+	query.Find(&trades)
+	c.JSON(http.StatusOK, trades)
 }
+
+// Comment Handlers
+
+func createComment(c *gin.Context) {
+	var req models.CommentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Verify User (optional, depends if we trust payload or Context using auth middleware)
+	// We can set req.UserID from context if we want to be strict, but let's trust payload + Auth check for now.
+
+	comment := models.Comment{
+		ID:        uuid.New().String(),
+		CoinID:    req.CoinID,
+		UserID:    req.UserID,
+		Username:  req.Username,
+		Avatar:    req.Avatar,
+		Content:   req.Content,
+		Likes:     0,
+		Timestamp: time.Now(),
+	}
+
+	if err := database.DB.Create(&comment).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create comment"})
+		return
+	}
+
+	realtime.BroadcastSafe("comment", comment)
+	c.JSON(http.StatusCreated, comment)
+}
+
+func getComments(c *gin.Context) {
+	coinID := c.Query("coinId")
+	var comments []models.Comment
+
+	database.DB.Where("coin_id = ?", coinID).Order("timestamp asc").Find(&comments)
+	c.JSON(http.StatusOK, comments)
+}
+
+func likeComment(c *gin.Context) {
+	coinID := c.Param("coinId") // unused in query but good for URL structure
+	_ = coinID
+	commentID := c.Param("commentId")
+
+	// Use SQL for atomic update
+	result := database.DB.Model(&models.Comment{}).
+		Where("id = ?", commentID).
+		UpdateColumn("likes", gorm.Expr("likes + ?", 1))
+
+	if result.Error != nil || result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Comment not found"})
+		return
+	}
+
+	var updatedComment models.Comment
+	database.DB.First(&updatedComment, "id = ?", commentID)
+
+	realtime.BroadcastSafe("commentUpdate", updatedComment)
+	c.JSON(http.StatusOK, updatedComment)
+}
+
+// Portfolio
 
 func getPortfolio(c *gin.Context) {
 	userID := c.Param("id")
 
-	storage.mu.RLock()
-	user, exists := storage.Users[userID]
-	if !exists {
-		storage.mu.RUnlock()
+	// Get user to verify existence (and username)
+	var user models.User
+	if err := database.DB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	username := user.Username
-	trades := make([]Trade, len(storage.Trades))
-	copy(trades, storage.Trades)
+	// Get all trades for user
+	var trades []models.Trade
+	database.DB.Where("username = ?", user.Username).Order("timestamp asc").Find(&trades)
+	// Note: Schema has UserID? models.Trade had `Username` string. Model def said: Username string.
+	// If we updated Trade model to have UserID, we should use that. model.go shows "Username string".
+	// Sticking to Username as per original design for now.
 
-	// Create a map to hold coin data to avoid holding the lock too long or resolving continuously
-	coinMap := make(map[string]*Coin)
-	for id, coin := range storage.Coins {
-		coinMap[id] = coin
+	portfolio := make(map[string]*models.PortfolioItem)
+
+	// Get all coins involved to minimize N+1
+	// Actually let's just fetch them as needed or prefetch.
+	// Optimize: Collect Coin IDs first.
+	coinIDs := make([]string, 0)
+	for _, t := range trades {
+		coinIDs = append(coinIDs, t.CoinID)
 	}
-	storage.mu.RUnlock()
 
-	portfolio := make(map[string]*PortfolioItem)
+	var coins []models.Coin
+	database.DB.Where("id IN ?", coinIDs).Find(&coins)
+	coinMap := make(map[string]*models.Coin)
+	for i := range coins {
+		coinMap[coins[i].ID] = &coins[i]
+	}
 
 	for _, trade := range trades {
-		if trade.Username != username {
-			continue
-		}
-
 		if _, exists := portfolio[trade.CoinID]; !exists {
 			if coin, ok := coinMap[trade.CoinID]; ok {
-				portfolio[trade.CoinID] = &PortfolioItem{
+				portfolio[trade.CoinID] = &models.PortfolioItem{
 					Coin:     coin,
 					Amount:   0,
 					Value:    0,
 					AvgPrice: 0,
 				}
 			} else {
-				continue // Skip if coin doesn't exist anymore?
+				continue
 			}
 		}
 
 		item := portfolio[trade.CoinID]
 
 		if trade.Type == "buy" {
-			// Weighted average price
 			totalCost := (item.Amount * item.AvgPrice) + (trade.Amount * trade.Price)
 			item.Amount += trade.Amount
 			if item.Amount > 0 {
@@ -736,14 +607,12 @@ func getPortfolio(c *gin.Context) {
 			}
 		} else {
 			item.Amount -= trade.Amount
-			// AvgPrice doesn't change on sell
 		}
 	}
 
-	// Convert map to slice and calculate current values
-	var result []PortfolioItem
+	var result []models.PortfolioItem
 	for _, item := range portfolio {
-		if item.Amount > 0.000001 { // Filter out negligible amounts
+		if item.Amount > 0.000001 {
 			item.Value = item.Amount * item.Coin.Price
 			result = append(result, *item)
 		}
@@ -753,51 +622,47 @@ func getPortfolio(c *gin.Context) {
 }
 
 func initMockData() {
+	// Simple check if data exists
+	var count int64
+	database.DB.Model(&models.User{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	log.Println("Seeding mock data...")
+
 	// Mock users
-	user1 := &User{
+	hashedPin, _ := auth.HashPin("1234")
+	user1 := models.User{
 		ID:        uuid.New().String(),
 		Username:  "CryptoKing",
 		Avatar:    "👑",
 		Bio:       "Diamond hands only",
+		Pin:       hashedPin,
 		CreatedAt: time.Now(),
 	}
-	user2 := &User{
-		ID:        uuid.New().String(),
-		Username:  "MoonBoy",
-		Avatar:    "🌙",
-		Bio:       "To the moon!",
-		CreatedAt: time.Now(),
-	}
-	storage.Users[user1.ID] = user1
-	storage.Users[user2.ID] = user2
+	database.DB.Create(&user1)
 
 	// Mock coins
-	mockCoins := []CreateCoinRequest{
+	mockCoins := []models.CreateCoinRequest{
 		{
 			Name:        "Pepe Rocket",
 			Symbol:      "PEPERK",
 			Description: "To the moon! 🚀",
 			Image:       "🐸",
-			Creator:     "0x742d...89Ab",
+			Creator:     "CryptoKing",
 		},
 		{
 			Name:        "Doge Galaxy",
 			Symbol:      "DOGEGX",
 			Description: "Much wow, very moon",
 			Image:       "🐕",
-			Creator:     "0x123a...45Cd",
-		},
-		{
-			Name:        "Chad Coin",
-			Symbol:      "CHAD",
-			Description: "Only chads allowed",
-			Image:       "💪",
-			Creator:     "0x987f...12Ef",
+			Creator:     "MoonBoy",
 		},
 	}
 
 	for _, req := range mockCoins {
-		coin := &Coin{
+		coin := models.Coin{
 			ID:          uuid.New().String(),
 			Name:        req.Name,
 			Symbol:      req.Symbol,
@@ -805,55 +670,12 @@ func initMockData() {
 			Image:       req.Image,
 			Creator:     req.Creator,
 			TotalSupply: 1000000000,
-			Price:       0.0001 + float64(len(storage.Coins))*0.0001,
+			Price:       0.0001,
 			CreatedAt:   time.Now(),
-			Holders:     100 + len(storage.Coins)*50,
+			Holders:     1,
 		}
-		coin.MarketCap = calculateMarketCap(coin)
+		coin.MarketCap = calculateMarketCap(&coin)
 		coin.Progress = calculateProgress(coin.MarketCap)
-		storage.Coins[coin.ID] = coin
-	}
-	storage.Save()
-}
-
-func main() {
-	storage.Load()
-	if len(storage.Coins) == 0 {
-		initMockData()
-	}
-
-	router := gin.Default()
-
-	config := cors.DefaultConfig()
-	config.AllowOrigins = []string{"http://localhost:3000", "http://localhost:3001", "http://localhost:5173"}
-	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept"}
-	router.Use(cors.New(config))
-
-	router.GET("/ws", handleWebSocket)
-	router.GET("/health", healthCheck)
-
-	api := router.Group("/api/v1")
-	{
-		api.POST("/coins", createCoin)
-		api.GET("/coins", getCoins)
-		api.GET("/coins/:id", getCoin)
-		api.POST("/trades", executeTradeSafe)
-		api.GET("/trades", getTrades)
-		api.POST("/comments", createComment)
-		api.GET("/comments", getComments)
-		api.POST("/comments/:coinId/:commentId/like", likeCommentSafe)
-		api.POST("/users", createUser)
-		api.POST("/users/login", loginUser)
-		api.PUT("/users/:id", updateUser)
-		api.GET("/users/:id", getUser)
-		api.GET("/users/:id/portfolio", getPortfolio)
-	}
-
-	port := "8080"
-	fmt.Printf("🚀 MemePump Backend running on http://localhost:%s\n", port)
-	// ...
-	if err := router.Run(":" + port); err != nil {
-		log.Fatal("Failed to start server:", err)
+		database.DB.Create(&coin)
 	}
 }

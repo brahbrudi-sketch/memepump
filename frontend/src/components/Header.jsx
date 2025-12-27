@@ -1,5 +1,6 @@
 import React from 'react';
 import { Rocket, User, History } from 'lucide-react';
+import WalletButton from './WalletButton';
 
 const Header = ({
     currentUser,
@@ -20,7 +21,8 @@ const Header = ({
                 </div>
 
                 <div className="flex items-center gap-4">
-                    {/* Launch Coin button removed as requested */}
+                    {/* Wallet Connect Button */}
+                    <WalletButton />
 
                     <div className="h-8 w-px bg-purple-800/50 mx-2 hidden sm:block"></div>
 
@@ -57,9 +59,9 @@ const Header = ({
                     </div>
                 </div>
             </div>
-            {/* Mobile Launch Button removed */}
         </header>
     );
 };
 
 export default Header;
+

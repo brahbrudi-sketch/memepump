@@ -34,14 +34,18 @@ const AuthModal = ({ onClose, onLogin }) => {
                 });
                 toast.success('Account created! Welcome!');
             } else {
-                response = await axios.post(`${API_URL}/users/login`, {
+                response = await axios.post(`${API_URL}/login`, {
                     username: formData.username,
                     pin: formData.pin
                 });
+                // Store token for authenticated requests
+                localStorage.setItem('memepump_token', response.data.token);
                 toast.success('Welcome back!');
             }
 
-            onLogin(response.data);
+            // For login, pass the user object; for register, pass the whole response
+            const userData = activeTab === 'login' ? response.data.user : response.data;
+            onLogin(userData);
             onClose();
         } catch (error) {
             console.error('Auth error:', error);
