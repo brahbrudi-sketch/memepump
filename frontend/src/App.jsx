@@ -28,8 +28,38 @@ function App() {
 
   // --- WebSocket & Data Loading ---
 
+  const loadStoredUser = () => {
+    const stored = localStorage.getItem('memepump_user');
+    if (stored) {
+      setCurrentUser(JSON.parse(stored));
+    }
+  };
+
+  const saveUser = (user) => {
+    localStorage.setItem('memepump_user', JSON.stringify(user));
+    setCurrentUser(user);
+  };
+
+  const loadCoins = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/coins`);
+      setCoins(response.data || []);
+    } catch (error) {
+      console.error('Error loading coins:', error);
+    }
+  };
+
+  const loadTrades = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/trades`);
+      setTrades(response.data || []);
+    } catch (error) {
+      console.error('Error loading trades:', error);
+    }
+  };
+
   // Defined BEFORE useEffect to avoid TDZ error in dependency array
-  const connectWebSocket = useCallback(() => {
+  const connectWebSocket = useCallback(function connect() {
     const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
@@ -77,7 +107,7 @@ function App() {
 
     ws.onclose = () => {
       console.log('WebSocket disconnected, reconnecting...');
-      setTimeout(connectWebSocket, 3000);
+      setTimeout(connect, 3000);
     };
 
     wsRef.current = ws;
@@ -95,36 +125,6 @@ function App() {
       }
     };
   }, [connectWebSocket]);
-
-  const loadStoredUser = () => {
-    const stored = localStorage.getItem('memepump_user');
-    if (stored) {
-      setCurrentUser(JSON.parse(stored));
-    }
-  };
-
-  const saveUser = (user) => {
-    localStorage.setItem('memepump_user', JSON.stringify(user));
-    setCurrentUser(user);
-  };
-
-  const loadCoins = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/coins`);
-      setCoins(response.data || []);
-    } catch (error) {
-      console.error('Error loading coins:', error);
-    }
-  };
-
-  const loadTrades = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/trades`);
-      setTrades(response.data || []);
-    } catch (error) {
-      console.error('Error loading trades:', error);
-    }
-  };
 
   return (
     <Router>
