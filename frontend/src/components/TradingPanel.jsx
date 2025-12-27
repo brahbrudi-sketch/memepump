@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
-import { History, MessageSquare, Send } from 'lucide-react';
+import { History, MessageSquare, Send, Heart } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import axios from 'axios';
 
@@ -56,14 +56,14 @@ const PriceChart = ({ trades }) => {
     );
 };
 
-const CommentsSection = ({ coin, comments, currentUser, setShowProfileModal, setComments }) => {
+const CommentsSection = ({ coin, comments, currentUser, setShowAuthModal }) => {
     const [commentText, setCommentText] = useState('');
 
     const handlePostComment = async () => {
         if (!commentText.trim()) return;
         if (!currentUser) {
             toast.error('Bitte erstelle zuerst ein Profil!');
-            setShowProfileModal(true);
+            setShowAuthModal(true);
             return;
         }
 
@@ -78,6 +78,22 @@ const CommentsSection = ({ coin, comments, currentUser, setShowProfileModal, set
             setCommentText('');
         } catch (error) {
             console.error('Error posting comment:', error);
+        }
+    };
+
+    const handleLike = async (commentId) => {
+        if (!currentUser) {
+            toast.error('Bitte erstelle zuerst ein Profil zu liken!');
+            setShowAuthModal(true);
+            return;
+        }
+
+        try {
+            // Optimistic update handled by WS or we can locally update if we want instant feedback?
+            // For now relies on WS or response.
+            await axios.post(`${API_URL}/comments/${coin.id}/${commentId}/like`);
+        } catch (error) {
+            console.error('Error liking:', error);
         }
     };
 
@@ -119,7 +135,14 @@ const CommentsSection = ({ coin, comments, currentUser, setShowProfileModal, set
                                         {new Date(comment.timestamp).toLocaleTimeString()}
                                     </span>
                                 </div>
-                                <p className="text-purple-100">{comment.content}</p>
+                                <p className="text-purple-100 mb-2">{comment.content}</p>
+                                <button
+                                    onClick={() => handleLike(comment.id)}
+                                    className="flex items-center gap-1 text-xs text-purple-400 hover:text-pink-500 transition group"
+                                >
+                                    <Heart className={`w-3 h-3 ${comment.likes > 0 ? 'fill-pink-500 text-pink-500' : 'group-hover:text-pink-500'}`} />
+                                    <span>{comment.likes || 0}</span>
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -129,7 +152,7 @@ const CommentsSection = ({ coin, comments, currentUser, setShowProfileModal, set
     );
 };
 
-const TradingPanel = ({ coin, trades, comments, currentUser, setShowProfileModal, setShowTradeHistory, setComments }) => {
+const TradingPanel = ({ coin, trades, comments, currentUser, setShowAuthModal, setShowTradeHistory }) => {
     const [isBuying, setIsBuying] = useState(true);
     const [tradeAmount, setTradeAmount] = useState('');
     const [loading, setLoading] = useState(false);
@@ -168,8 +191,7 @@ const TradingPanel = ({ coin, trades, comments, currentUser, setShowProfileModal
                 coin={coin}
                 comments={comments}
                 currentUser={currentUser}
-                setShowProfileModal={setShowProfileModal}
-                setComments={setComments}
+                setShowAuthModal={setShowAuthModal}
             />
 
             <div className="bg-gradient-to-br from-indigo-900 to-purple-900 rounded-2xl p-6 border border-purple-500">

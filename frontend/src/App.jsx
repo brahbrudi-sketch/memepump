@@ -1,13 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Toaster, toast } from 'react-hot-toast';
-import { Rocket, User, History } from 'lucide-react';
 
+import Header from './components/Header';
 import Home from './pages/Home';
 import CoinDetails from './pages/CoinDetails';
-import ProfileModal from './components/modals/ProfileModal';
+import UserProfile from './pages/UserProfile';
+import AuthModal from './components/modals/AuthModal';
+import SettingsModal from './components/modals/SettingsModal';
 import TradeHistoryModal from './components/modals/TradeHistoryModal';
+import ActivityTicker from './components/ActivityTicker';
 
 const API_URL = 'http://localhost:8080/api/v1';
 const WS_URL = 'ws://localhost:8080/ws';
@@ -17,26 +20,16 @@ function App() {
   const [trades, setTrades] = useState([]);
   const [comments, setComments] = useState({});
   const [currentUser, setCurrentUser] = useState(null);
-  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showTradeHistory, setShowTradeHistory] = useState(false);
 
   const wsRef = useRef(null);
 
   // --- WebSocket & Data Loading ---
-  useEffect(() => {
-    loadCoins();
-    loadTrades();
-    loadStoredUser();
-    connectWebSocket();
 
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, []);
-
-  const connectWebSocket = () => {
+  // Defined BEFORE useEffect to avoid TDZ error in dependency array
+  const connectWebSocket = useCallback(() => {
     const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
@@ -67,6 +60,7 @@ function App() {
         ), { duration: 4000 });
 
       } else if (message.type === 'trade') {
+        // We can reload coins to update prices, or just push the trade
         loadCoins();
         setTrades(prev => [message.data.trade, ...prev]);
       } else if (message.type === 'comment') {
@@ -87,7 +81,20 @@ function App() {
     };
 
     wsRef.current = ws;
-  };
+  }, []);
+
+  useEffect(() => {
+    loadCoins();
+    loadTrades();
+    loadStoredUser();
+    connectWebSocket();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [connectWebSocket]);
 
   const loadStoredUser = () => {
     const stored = localStorage.getItem('memepump_user');
@@ -119,10 +126,6 @@ function App() {
     }
   };
 
-  // Comments loading is optimized to load on demand in the components usually,
-  // but for WS updates we need the state here. 
-  // We can let the components fetch initial history.
-
   return (
     <Router>
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white">
@@ -135,11 +138,25 @@ function App() {
         }} />
 
         {/* Modals placed at root level */}
-        {showProfileModal && (
-          <ProfileModal
+        {showAuthModal && (
+          <AuthModal
+            onClose={() => setShowAuthModal(false)}
+            onLogin={(user) => {
+              saveUser(user);
+              setShowAuthModal(false);
+            }}
+          />
+        )}
+
+        {showSettingsModal && currentUser && (
+          <SettingsModal
             currentUser={currentUser}
-            onClose={() => setShowProfileModal(false)}
-            onSave={saveUser} // Pass the saveUser function to update state
+            onClose={() => setShowSettingsModal(false)}
+            onUpdate={saveUser}
+            onLogout={() => {
+              localStorage.removeItem('memepump_user');
+              setCurrentUser(null);
+            }}
           />
         )}
         {showTradeHistory && (
@@ -152,45 +169,12 @@ function App() {
         )}
 
         {/* Global Header */}
-        <header className="border-b border-purple-500/30 backdrop-blur-sm bg-black/20 sticky top-0 z-40">
-          <div className="container mx-auto px-4 py-4">
-            <div className="flex items-center justify-between">
-              <a href="/" className="flex items-center gap-3 hover:opacity-80 transition">
-                <Rocket className="w-8 h-8 text-purple-400" />
-                <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
-                  MemePump
-                </h1>
-                <span className="hidden sm:flex px-3 py-1 rounded-full bg-green-500/20 text-green-400 text-xs font-bold items-center gap-1">
-                  <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-                  LIVE
-                </span>
-              </a>
-
-              <div className="flex gap-3 items-center">
-                {currentUser && (
-                  <div className="hidden sm:flex items-center gap-2 px-4 py-2 rounded-lg bg-purple-900/50 border border-purple-500">
-                    <span className="text-2xl">{currentUser.avatar}</span>
-                    <span className="font-bold truncate max-w-[100px]">{currentUser.username}</span>
-                  </div>
-                )}
-                <button
-                  onClick={() => setShowProfileModal(true)}
-                  className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 rounded-lg bg-indigo-700 hover:bg-indigo-600 transition font-bold text-sm sm:text-base"
-                >
-                  <User className="w-5 h-5" />
-                  <span className="hidden sm:inline">{currentUser ? 'Profile' : 'Login'}</span>
-                </button>
-                <button
-                  onClick={() => setShowTradeHistory(true)}
-                  className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 rounded-lg bg-purple-700 hover:bg-purple-600 transition font-bold text-sm sm:text-base"
-                >
-                  <History className="w-5 h-5" />
-                  <span className="hidden sm:inline">Trades</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </header>
+        <Header
+          currentUser={currentUser}
+          onOpenAuth={() => setShowAuthModal(true)}
+          onOpenSettings={() => setShowSettingsModal(true)}
+          onOpenHistory={() => setShowTradeHistory(true)}
+        />
 
         {/* Main Content Info */}
         <Routes>
@@ -212,12 +196,17 @@ function App() {
                 trades={trades}
                 comments={comments}
                 currentUser={currentUser}
-                setShowProfileModal={setShowProfileModal}
-                setComments={setComments}
+                setShowAuthModal={setShowAuthModal}
               />
             }
           />
+          <Route
+            path="/u/:id"
+            element={<UserProfile coins={coins} />}
+          />
         </Routes>
+
+        <ActivityTicker trades={trades} coins={coins} />
 
       </div>
     </Router>

@@ -1,17 +1,20 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { Twitter, Globe, Send, Rocket } from 'lucide-react';
 
 const API_URL = 'http://localhost:8080/api/v1';
 
 const CreateCoinModal = ({ currentUser, onClose, onCreated }) => {
     const [loading, setLoading] = useState(false);
     const [formData, setFormData] = useState({
-        name: '',
-        symbol: '',
         description: '',
         image: '',
-        creator: currentUser?.username || '0x' + Math.random().toString(16).substr(2, 8)
+        creator: currentUser?.username || '0x' + Math.random().toString(16).substr(2, 8),
+        twitter: '',
+        telegram: '',
+        website: '',
+        initialBuyAmount: 0
     });
 
     const handleCreate = async () => {
@@ -22,7 +25,8 @@ const CreateCoinModal = ({ currentUser, onClose, onCreated }) => {
 
         try {
             setLoading(true);
-            await axios.post(`${API_URL}/coins`, formData);
+            const payload = { ...formData, initialBuyAmount: parseFloat(formData.initialBuyAmount) || 0 };
+            await axios.post(`${API_URL}/coins`, payload);
             onCreated();
             toast.success('Coin erfolgreich erstellt! 🚀');
             onClose();
@@ -80,6 +84,28 @@ const CreateCoinModal = ({ currentUser, onClose, onCreated }) => {
                             onChange={(e) => setFormData({ ...formData, image: e.target.value })}
                             className="w-full px-4 py-3 rounded-lg bg-purple-950 text-white border border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-400"
                             placeholder="🚀"
+                        />
+                    </div>
+
+                    <div className="space-y-4 border-t border-purple-700 pt-4">
+                        <h3 className="text-purple-300 font-bold uppercase text-sm tracking-wider">Socials (Optional)</h3>
+                        <div className="grid grid-cols-3 gap-2">
+                            <input type="text" value={formData.twitter} onChange={e => setFormData({ ...formData, twitter: e.target.value })} placeholder="Twitter" className="px-3 py-2 rounded bg-purple-950 border border-purple-500 text-sm focus:outline-none" />
+                            <input type="text" value={formData.telegram} onChange={e => setFormData({ ...formData, telegram: e.target.value })} placeholder="Telegram" className="px-3 py-2 rounded bg-purple-950 border border-purple-500 text-sm focus:outline-none" />
+                            <input type="text" value={formData.website} onChange={e => setFormData({ ...formData, website: e.target.value })} placeholder="Website" className="px-3 py-2 rounded bg-purple-950 border border-purple-500 text-sm focus:outline-none" />
+                        </div>
+                    </div>
+
+                    <div className="bg-purple-950/50 p-4 rounded-xl border border-purple-700">
+                        <h3 className="text-green-400 font-bold uppercase text-sm tracking-wider mb-2">Initial Buy (Snipe) 🎯</h3>
+                        <input
+                            type="number"
+                            value={formData.initialBuyAmount}
+                            onChange={(e) => setFormData({ ...formData, initialBuyAmount: e.target.value })}
+                            className="w-full px-4 py-2 rounded-lg bg-purple-900 text-white border border-purple-500 focus:outline-none font-mono"
+                            placeholder="0.0 SOL"
+                            step="0.1"
+                            min="0"
                         />
                     </div>
                     <div className="flex gap-3 pt-4">

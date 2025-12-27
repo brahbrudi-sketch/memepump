@@ -3,6 +3,7 @@ import { TrendingUp, Plus, Filter, ArrowUpDown, Rocket } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import CoinCard from '../components/CoinCard';
 import CreateCoinModal from '../components/modals/CreateCoinModal';
+import KingOfTheHill from '../components/KingOfTheHill';
 
 const Home = ({ coins, currentUser, onCoinCreated, comments }) => {
     const navigate = useNavigate();

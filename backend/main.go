@@ -21,6 +21,9 @@ type Coin struct {
 	Description string    `json:"description"`
 	Image       string    `json:"image"`
 	Creator     string    `json:"creator"`
+	Twitter     string    `json:"twitter"`
+	Telegram    string    `json:"telegram"`
+	Website     string    `json:"website"`
 	MarketCap   float64   `json:"marketCap"`
 	Progress    float64   `json:"progress"`
 	TotalSupply float64   `json:"totalSupply"`
@@ -47,6 +50,7 @@ type Comment struct {
 	Username  string    `json:"username"`
 	Avatar    string    `json:"avatar"`
 	Content   string    `json:"content"`
+	Likes     int       `json:"likes"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
@@ -55,15 +59,23 @@ type User struct {
 	Username  string    `json:"username"`
 	Avatar    string    `json:"avatar"`
 	Bio       string    `json:"bio"`
+	Pin       string    `json:"pin"` // Simple security code
+	Twitter   string    `json:"twitter"`
+	Telegram  string    `json:"telegram"`
+	Website   string    `json:"website"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
 type CreateCoinRequest struct {
-	Name        string `json:"name" binding:"required"`
-	Symbol      string `json:"symbol" binding:"required"`
-	Description string `json:"description" binding:"required"`
-	Image       string `json:"image" binding:"required"`
-	Creator     string `json:"creator" binding:"required"`
+	Name             string  `json:"name" binding:"required"`
+	Symbol           string  `json:"symbol" binding:"required"`
+	Description      string  `json:"description" binding:"required"`
+	Image            string  `json:"image" binding:"required"`
+	Creator          string  `json:"creator" binding:"required"`
+	Twitter          string  `json:"twitter"`
+	Telegram         string  `json:"telegram"`
+	Website          string  `json:"website"`
+	InitialBuyAmount float64 `json:"initialBuyAmount"`
 }
 
 type TradeRequest struct {
@@ -86,6 +98,25 @@ type CreateUserRequest struct {
 	Username string `json:"username" binding:"required"`
 	Avatar   string `json:"avatar"`
 	Bio      string `json:"bio"`
+	Pin      string `json:"pin" binding:"required"`
+	Twitter  string `json:"twitter"`
+	Telegram string `json:"telegram"`
+	Website  string `json:"website"`
+}
+
+type LoginRequest struct {
+	Username string `json:"username" binding:"required"`
+	Pin      string `json:"pin" binding:"required"`
+}
+
+type UpdateUserRequest struct {
+	Username string `json:"username"`
+	Avatar   string `json:"avatar"`
+	Bio      string `json:"bio"`
+	Pin      string `json:"pin" binding:"required"` // Current Pin needed to update
+	Twitter  string `json:"twitter"`
+	Telegram string `json:"telegram"`
+	Website  string `json:"website"`
 }
 
 // WebSocket
@@ -192,6 +223,9 @@ func createCoin(c *gin.Context) {
 		Description: req.Description,
 		Image:       req.Image,
 		Creator:     req.Creator,
+		Twitter:     req.Twitter,
+		Telegram:    req.Telegram,
+		Website:     req.Website,
 		TotalSupply: 1000000000,
 		Price:       0.0001,
 		CreatedAt:   time.Now(),
@@ -204,6 +238,41 @@ func createCoin(c *gin.Context) {
 	storage.mu.Lock()
 	storage.Coins[coin.ID] = coin
 	storage.mu.Unlock()
+
+	// Handle Initial Buy if requested
+	if req.InitialBuyAmount > 0 {
+		storage.mu.Lock()
+		// Get pointer back
+		cPtr := storage.Coins[coin.ID]
+
+		buyAmount := req.InitialBuyAmount
+		newSupply := cPtr.TotalSupply + (buyAmount * 1000000)
+
+		cPtr.TotalSupply = newSupply
+		cPtr.Price = calculatePrice(cPtr.TotalSupply)
+		cPtr.MarketCap = calculateMarketCap(cPtr)
+		cPtr.Progress = calculateProgress(cPtr.MarketCap)
+		// cPtr.Holders is already 1 (creator)
+
+		trade := Trade{
+			ID:        uuid.New().String(),
+			CoinID:    cPtr.ID,
+			Type:      "buy",
+			Amount:    buyAmount,
+			Price:     cPtr.Price,
+			Wallet:    "CREATOR_WALLET",
+			Username:  req.Creator,
+			Timestamp: time.Now(),
+		}
+
+		storage.Trades = append(storage.Trades, trade)
+		storage.mu.Unlock()
+
+		go broadcast("trade", map[string]interface{}{
+			"trade": trade,
+			"coin":  cPtr,
+		})
+	}
 
 	storage.Save()
 	broadcast("coinCreated", coin)
@@ -383,6 +452,10 @@ func getTrades(c *gin.Context) {
 		}
 	}
 
+	// Reverse to show newest first
+	// Optimize: In a real app we would sort, but append order is roughly time order.
+	// Let's just return as is, frontend can reverse.
+
 	c.JSON(http.StatusOK, filteredTrades)
 }
 
@@ -400,6 +473,7 @@ func createComment(c *gin.Context) {
 		Username:  req.Username,
 		Avatar:    req.Avatar,
 		Content:   req.Content,
+		Likes:     0,
 		Timestamp: time.Now(),
 	}
 
@@ -426,6 +500,36 @@ func getComments(c *gin.Context) {
 	c.JSON(http.StatusOK, comments)
 }
 
+// Better implementation of likeComment without defer to allow Save()
+func likeCommentSafe(c *gin.Context) {
+	coinID := c.Param("coinId")
+	commentID := c.Param("commentId")
+
+	storage.mu.Lock()
+	comments := storage.Comments[coinID]
+	var updatedComment *Comment
+
+	for i := range comments {
+		if comments[i].ID == commentID {
+			comments[i].Likes++
+			updatedComment = &comments[i]
+			break
+		}
+	}
+	storage.mu.Unlock()
+
+	if updatedComment == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Comment not found"})
+		return
+	}
+
+	storage.Save()
+	// Broadcast update (re-using comment type, frontend merges it)
+	broadcast("commentUpdate", *updatedComment)
+
+	c.JSON(http.StatusOK, updatedComment)
+}
+
 func createUser(c *gin.Context) {
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -437,20 +541,118 @@ func createUser(c *gin.Context) {
 		return
 	}
 
-	user := &User{
-		ID:        uuid.New().String(),
-		Username:  req.Username,
-		Avatar:    req.Avatar,
-		Bio:       req.Bio,
-		CreatedAt: time.Now(),
+	var user *User
+
+	// Check if update
+	storage.mu.Lock()
+	var existing *User
+	for _, u := range storage.Users {
+		if u.Username == req.Username {
+			existing = u
+			break
+		}
 	}
 
-	storage.mu.Lock()
-	storage.Users[user.ID] = user
+	if existing != nil {
+		existing.Avatar = req.Avatar
+		existing.Bio = req.Bio
+		existing.Twitter = req.Twitter
+		existing.Telegram = req.Telegram
+		existing.Website = req.Website
+		user = existing
+	} else {
+		user = &User{
+			ID:        uuid.New().String(),
+			Username:  req.Username,
+			Avatar:    req.Avatar,
+			Bio:       req.Bio,
+			Twitter:   req.Twitter,
+			Telegram:  req.Telegram,
+			Website:   req.Website,
+			CreatedAt: time.Now(),
+		}
+		storage.Users[user.ID] = user
+	}
 	storage.mu.Unlock()
 
 	storage.Save()
 	c.JSON(http.StatusCreated, user)
+	storage.Save()
+	c.JSON(http.StatusCreated, user)
+}
+
+func loginUser(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	storage.mu.RLock()
+	defer storage.mu.RUnlock()
+
+	var foundUser *User
+	for _, u := range storage.Users {
+		if u.Username == req.Username {
+			foundUser = u
+			break
+		}
+	}
+
+	if foundUser == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		return
+	}
+
+	if foundUser.Pin != req.Pin {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid PIN"})
+		return
+	}
+
+	c.JSON(http.StatusOK, foundUser)
+}
+
+func updateUser(c *gin.Context) {
+	id := c.Param("id")
+	var req UpdateUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	storage.mu.Lock()
+	user, exists := storage.Users[id]
+	if !exists {
+		storage.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if user.Pin != req.Pin {
+		storage.mu.Unlock()
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid PIN"})
+		return
+	}
+
+	if req.Avatar != "" {
+		user.Avatar = req.Avatar
+	}
+	if req.Bio != "" {
+		user.Bio = req.Bio
+	}
+	if req.Twitter != "" {
+		user.Twitter = req.Twitter
+	}
+	if req.Telegram != "" {
+		user.Telegram = req.Telegram
+	}
+	if req.Website != "" {
+		user.Website = req.Website
+	}
+
+	storage.mu.Unlock()
+	storage.Save()
+	c.JSON(http.StatusOK, user)
 }
 
 func getUser(c *gin.Context) {
@@ -641,7 +843,10 @@ func main() {
 		api.GET("/trades", getTrades)
 		api.POST("/comments", createComment)
 		api.GET("/comments", getComments)
+		api.POST("/comments/:coinId/:commentId/like", likeCommentSafe)
 		api.POST("/users", createUser)
+		api.POST("/users/login", loginUser)
+		api.PUT("/users/:id", updateUser)
 		api.GET("/users/:id", getUser)
 		api.GET("/users/:id/portfolio", getPortfolio)
 	}

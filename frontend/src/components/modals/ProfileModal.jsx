@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { User, PieChart } from 'lucide-react';
+import { User, PieChart, Twitter, Globe, Send } from 'lucide-react';
 import toast from 'react-hot-toast';
 import Portfolio from '../Portfolio';
 
@@ -12,7 +12,10 @@ const ProfileModal = ({ currentUser, onClose, onSave }) => {
     const [formData, setFormData] = useState({
         username: currentUser?.username || '',
         avatar: currentUser?.avatar || '😎',
-        bio: currentUser?.bio || ''
+        bio: currentUser?.bio || '',
+        twitter: currentUser?.twitter || '',
+        telegram: currentUser?.telegram || '',
+        website: currentUser?.website || ''
     });
 
     const handleSave = async () => {

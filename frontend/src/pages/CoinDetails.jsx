@@ -1,7 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
-import { ArrowLeft, Rocket } from 'lucide-react';
+import { ArrowLeft, Twitter, Globe, Send } from 'lucide-react';
 import TradingPanel from '../components/TradingPanel';
 import CoinCard from '../components/CoinCard';
 
@@ -12,12 +11,11 @@ const CoinDetails = ({
     trades,
     comments,
     currentUser,
-    setShowProfileModal,
+    setShowAuthModal,
     setComments
 }) => {
     const { id } = useParams();
     const navigate = useNavigate();
-    const [showTradeHistory, setShowTradeHistory] = useState(false);
 
     // Find coin from props or fetch if needed (for now props are passed from App which holds WebSocket state)
     const coin = coins.find(c => c.id === id);
@@ -66,6 +64,11 @@ const CoinDetails = ({
                                         <span className="font-mono bg-purple-900/50 px-2 py-1 rounded text-sm">{coin.symbol}</span>
                                         <span>•</span>
                                         <span className="text-sm">Created by {coin.creator.substring(0, 8)}...</span>
+                                    </div>
+                                    <div className="flex gap-2 mt-2">
+                                        {coin.twitter && <a href={coin.twitter} target="_blank" className="p-1.5 bg-purple-900/50 rounded hover:bg-purple-800 text-purple-300 hover:text-white transition"><Twitter className="w-4 h-4" /></a>}
+                                        {coin.telegram && <a href={coin.telegram} target="_blank" className="p-1.5 bg-purple-900/50 rounded hover:bg-purple-800 text-purple-300 hover:text-white transition"><Send className="w-4 h-4" /></a>}
+                                        {coin.website && <a href={coin.website} target="_blank" className="p-1.5 bg-purple-900/50 rounded hover:bg-purple-800 text-purple-300 hover:text-white transition"><Globe className="w-4 h-4" /></a>}
                                     </div>
                                 </div>
                             </div>
@@ -128,7 +131,7 @@ const CoinDetails = ({
                             trades={trades}
                             comments={comments[coin.id] || []}
                             currentUser={currentUser}
-                            setShowProfileModal={setShowProfileModal}
+                            setShowAuthModal={setShowAuthModal}
                             setShowTradeHistory={setShowTradeHistory} // We might need to hoist this modal up to App or handle here
                             setComments={setComments}
                         />
