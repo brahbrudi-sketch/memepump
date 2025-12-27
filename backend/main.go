@@ -5,7 +5,6 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -101,38 +100,21 @@ type WSMessage struct {
 	Data interface{} `json:"data"`
 }
 
-// Storage
-type Storage struct {
-	mu       sync.RWMutex
-	coins    map[string]*Coin
-	trades   []Trade
-	comments map[string][]Comment
-	users    map[string]*User
-	clients  map[*websocket.Conn]bool
-}
-
-var storage = &Storage{
-	coins:    make(map[string]*Coin),
-	trades:   []Trade{},
-	comments: make(map[string][]Comment),
-	users:    make(map[string]*User),
-	clients:  make(map[*websocket.Conn]bool),
-}
+var storage = NewStorage("data.json")
 
 func broadcast(msgType string, data interface{}) {
-	storage.mu.RLock()
-	defer storage.mu.RUnlock()
+	clients := storage.GetClients()
 
 	msg := WSMessage{
 		Type: msgType,
 		Data: data,
 	}
 
-	for client := range storage.clients {
+	for _, client := range clients {
 		err := client.WriteJSON(msg)
 		if err != nil {
 			client.Close()
-			delete(storage.clients, client)
+			storage.RemoveClient(client)
 		}
 	}
 }
@@ -163,21 +145,19 @@ func handleWebSocket(c *gin.Context) {
 		return
 	}
 
-	storage.mu.Lock()
-	storage.clients[conn] = true
-	storage.mu.Unlock()
+	storage.AddClient(conn)
 
 	// Send initial data
-	coins := make([]*Coin, 0, len(storage.coins))
-	for _, coin := range storage.coins {
+	storage.mu.RLock()
+	coins := make([]*Coin, 0, len(storage.Coins))
+	for _, coin := range storage.Coins {
 		coins = append(coins, coin)
 	}
+	storage.mu.RUnlock()
 	conn.WriteJSON(WSMessage{Type: "coins", Data: coins})
 
 	defer func() {
-		storage.mu.Lock()
-		delete(storage.clients, conn)
-		storage.mu.Unlock()
+		storage.RemoveClient(conn)
 		conn.Close()
 	}()
 
@@ -193,6 +173,15 @@ func createCoin(c *gin.Context) {
 	var req CreateCoinRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(req.Name) > 32 || len(req.Symbol) > 10 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Name or Symbol too long"})
+		return
+	}
+	if len(req.Description) > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Description too long"})
 		return
 	}
 
@@ -213,9 +202,10 @@ func createCoin(c *gin.Context) {
 	coin.Progress = calculateProgress(coin.MarketCap)
 
 	storage.mu.Lock()
-	storage.coins[coin.ID] = coin
+	storage.Coins[coin.ID] = coin
 	storage.mu.Unlock()
 
+	storage.Save()
 	broadcast("coinCreated", coin)
 	c.JSON(http.StatusCreated, coin)
 }
@@ -224,8 +214,8 @@ func getCoins(c *gin.Context) {
 	storage.mu.RLock()
 	defer storage.mu.RUnlock()
 
-	coins := make([]*Coin, 0, len(storage.coins))
-	for _, coin := range storage.coins {
+	coins := make([]*Coin, 0, len(storage.Coins))
+	for _, coin := range storage.Coins {
 		coins = append(coins, coin)
 	}
 
@@ -236,7 +226,7 @@ func getCoin(c *gin.Context) {
 	id := c.Param("id")
 
 	storage.mu.RLock()
-	coin, exists := storage.coins[id]
+	coin, exists := storage.Coins[id]
 	storage.mu.RUnlock()
 
 	if !exists {
@@ -260,9 +250,12 @@ func executeTrade(c *gin.Context) {
 	}
 
 	storage.mu.Lock()
+	// Lock is held for the entire operation to ensure consistency
+	// Defer unlock is risky if we have multiple return points, but safe here if we unlock before return or defer.
+	// Since we are doing logic inside, let's defer unlock.
 	defer storage.mu.Unlock()
 
-	coin, exists := storage.coins[req.CoinID]
+	coin, exists := storage.Coins[req.CoinID]
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
 		return
@@ -295,7 +288,76 @@ func executeTrade(c *gin.Context) {
 		Timestamp: time.Now(),
 	}
 
-	storage.trades = append(storage.trades, trade)
+	storage.Trades = append(storage.Trades, trade)
+
+	// We are under lock, so we can't call broadcast immediately IF broadcast sends messages that might take time?
+	// No, broadcast iterates clients. It should be fine.
+	// But wait, I need to Save() too.
+	// Save() acquires RLock on storage.
+	// We hold Lock on storage. RLock will block!
+	// DEADLOCK!
+
+	// I must NOT call Save() while holding Lock.
+	// I need to release Lock before calling Save().
+}
+
+// REWRITING executeTrade to be safe
+func executeTradeSafe(c *gin.Context) {
+	var req TradeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Type != "buy" && req.Type != "sell" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trade type"})
+		return
+	}
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Amount must be positive"})
+		return
+	}
+
+	storage.mu.Lock()
+	coin, exists := storage.Coins[req.CoinID]
+	if !exists {
+		storage.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "Coin not found"})
+		return
+	}
+
+	var newSupply float64
+	if req.Type == "buy" {
+		newSupply = coin.TotalSupply + (req.Amount * 1000000)
+	} else {
+		newSupply = coin.TotalSupply - (req.Amount * 1000000)
+		if newSupply < 0 {
+			storage.mu.Unlock()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient supply"})
+			return
+		}
+	}
+
+	coin.TotalSupply = newSupply
+	coin.Price = calculatePrice(coin.TotalSupply)
+	coin.MarketCap = calculateMarketCap(coin)
+	coin.Progress = calculateProgress(coin.MarketCap)
+
+	trade := Trade{
+		ID:        uuid.New().String(),
+		CoinID:    req.CoinID,
+		Type:      req.Type,
+		Amount:    req.Amount,
+		Price:     coin.Price,
+		Wallet:    req.Wallet,
+		Username:  req.Username,
+		Timestamp: time.Now(),
+	}
+
+	storage.Trades = append(storage.Trades, trade)
+	storage.mu.Unlock()
+
+	storage.Save()
 
 	go broadcast("trade", map[string]interface{}{
 		"trade": trade,
@@ -315,7 +377,7 @@ func getTrades(c *gin.Context) {
 	defer storage.mu.RUnlock()
 
 	var filteredTrades []Trade
-	for _, trade := range storage.trades {
+	for _, trade := range storage.Trades {
 		if coinID == "" || trade.CoinID == coinID {
 			filteredTrades = append(filteredTrades, trade)
 		}
@@ -342,9 +404,10 @@ func createComment(c *gin.Context) {
 	}
 
 	storage.mu.Lock()
-	storage.comments[req.CoinID] = append(storage.comments[req.CoinID], comment)
+	storage.Comments[req.CoinID] = append(storage.Comments[req.CoinID], comment)
 	storage.mu.Unlock()
 
+	storage.Save()
 	broadcast("comment", comment)
 	c.JSON(http.StatusCreated, comment)
 }
@@ -355,7 +418,7 @@ func getComments(c *gin.Context) {
 	storage.mu.RLock()
 	defer storage.mu.RUnlock()
 
-	comments := storage.comments[coinID]
+	comments := storage.Comments[coinID]
 	if comments == nil {
 		comments = []Comment{}
 	}
@@ -369,6 +432,10 @@ func createUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if len(req.Username) > 32 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Username too long"})
+		return
+	}
 
 	user := &User{
 		ID:        uuid.New().String(),
@@ -379,9 +446,10 @@ func createUser(c *gin.Context) {
 	}
 
 	storage.mu.Lock()
-	storage.users[user.ID] = user
+	storage.Users[user.ID] = user
 	storage.mu.Unlock()
 
+	storage.Save()
 	c.JSON(http.StatusCreated, user)
 }
 
@@ -389,7 +457,7 @@ func getUser(c *gin.Context) {
 	id := c.Param("id")
 
 	storage.mu.RLock()
-	user, exists := storage.users[id]
+	user, exists := storage.Users[id]
 	storage.mu.RUnlock()
 
 	if !exists {
@@ -405,6 +473,82 @@ func healthCheck(c *gin.Context) {
 		"status": "ok",
 		"time":   time.Now(),
 	})
+}
+
+type PortfolioItem struct {
+	Coin     *Coin   `json:"coin"`
+	Amount   float64 `json:"amount"`
+	Value    float64 `json:"value"`
+	AvgPrice float64 `json:"avgPrice"`
+}
+
+func getPortfolio(c *gin.Context) {
+	userID := c.Param("id")
+
+	storage.mu.RLock()
+	user, exists := storage.Users[userID]
+	if !exists {
+		storage.mu.RUnlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	username := user.Username
+	trades := make([]Trade, len(storage.Trades))
+	copy(trades, storage.Trades)
+
+	// Create a map to hold coin data to avoid holding the lock too long or resolving continuously
+	coinMap := make(map[string]*Coin)
+	for id, coin := range storage.Coins {
+		coinMap[id] = coin
+	}
+	storage.mu.RUnlock()
+
+	portfolio := make(map[string]*PortfolioItem)
+
+	for _, trade := range trades {
+		if trade.Username != username {
+			continue
+		}
+
+		if _, exists := portfolio[trade.CoinID]; !exists {
+			if coin, ok := coinMap[trade.CoinID]; ok {
+				portfolio[trade.CoinID] = &PortfolioItem{
+					Coin:     coin,
+					Amount:   0,
+					Value:    0,
+					AvgPrice: 0,
+				}
+			} else {
+				continue // Skip if coin doesn't exist anymore?
+			}
+		}
+
+		item := portfolio[trade.CoinID]
+
+		if trade.Type == "buy" {
+			// Weighted average price
+			totalCost := (item.Amount * item.AvgPrice) + (trade.Amount * trade.Price)
+			item.Amount += trade.Amount
+			if item.Amount > 0 {
+				item.AvgPrice = totalCost / item.Amount
+			}
+		} else {
+			item.Amount -= trade.Amount
+			// AvgPrice doesn't change on sell
+		}
+	}
+
+	// Convert map to slice and calculate current values
+	var result []PortfolioItem
+	for _, item := range portfolio {
+		if item.Amount > 0.000001 { // Filter out negligible amounts
+			item.Value = item.Amount * item.Coin.Price
+			result = append(result, *item)
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 func initMockData() {
@@ -423,8 +567,8 @@ func initMockData() {
 		Bio:       "To the moon!",
 		CreatedAt: time.Now(),
 	}
-	storage.users[user1.ID] = user1
-	storage.users[user2.ID] = user2
+	storage.Users[user1.ID] = user1
+	storage.Users[user2.ID] = user2
 
 	// Mock coins
 	mockCoins := []CreateCoinRequest{
@@ -460,18 +604,22 @@ func initMockData() {
 			Image:       req.Image,
 			Creator:     req.Creator,
 			TotalSupply: 1000000000,
-			Price:       0.0001 + float64(len(storage.coins))*0.0001,
+			Price:       0.0001 + float64(len(storage.Coins))*0.0001,
 			CreatedAt:   time.Now(),
-			Holders:     100 + len(storage.coins)*50,
+			Holders:     100 + len(storage.Coins)*50,
 		}
 		coin.MarketCap = calculateMarketCap(coin)
 		coin.Progress = calculateProgress(coin.MarketCap)
-		storage.coins[coin.ID] = coin
+		storage.Coins[coin.ID] = coin
 	}
+	storage.Save()
 }
 
 func main() {
-	initMockData()
+	storage.Load()
+	if len(storage.Coins) == 0 {
+		initMockData()
+	}
 
 	router := gin.Default()
 
@@ -489,29 +637,18 @@ func main() {
 		api.POST("/coins", createCoin)
 		api.GET("/coins", getCoins)
 		api.GET("/coins/:id", getCoin)
-		api.POST("/trades", executeTrade)
+		api.POST("/trades", executeTradeSafe)
 		api.GET("/trades", getTrades)
 		api.POST("/comments", createComment)
 		api.GET("/comments", getComments)
 		api.POST("/users", createUser)
 		api.GET("/users/:id", getUser)
+		api.GET("/users/:id/portfolio", getPortfolio)
 	}
 
 	port := "8080"
 	fmt.Printf("🚀 MemePump Backend running on http://localhost:%s\n", port)
-	fmt.Println("📊 API Endpoints:")
-	fmt.Println("   WS   /ws")
-	fmt.Println("   GET  /health")
-	fmt.Println("   GET  /api/v1/coins")
-	fmt.Println("   POST /api/v1/coins")
-	fmt.Println("   GET  /api/v1/coins/:id")
-	fmt.Println("   POST /api/v1/trades")
-	fmt.Println("   GET  /api/v1/trades")
-	fmt.Println("   POST /api/v1/comments")
-	fmt.Println("   GET  /api/v1/comments")
-	fmt.Println("   POST /api/v1/users")
-	fmt.Println("   GET  /api/v1/users/:id")
-
+	// ...
 	if err := router.Run(":" + port); err != nil {
 		log.Fatal("Failed to start server:", err)
 	}
