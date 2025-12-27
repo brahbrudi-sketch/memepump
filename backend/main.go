@@ -564,6 +564,7 @@ func createUser(c *gin.Context) {
 		user = &User{
 			ID:        uuid.New().String(),
 			Username:  req.Username,
+			Pin:       req.Pin,
 			Avatar:    req.Avatar,
 			Bio:       req.Bio,
 			Twitter:   req.Twitter,
@@ -575,8 +576,6 @@ func createUser(c *gin.Context) {
 	}
 	storage.mu.Unlock()
 
-	storage.Save()
-	c.JSON(http.StatusCreated, user)
 	storage.Save()
 	c.JSON(http.StatusCreated, user)
 }

@@ -197,6 +197,8 @@ function App() {
                 comments={comments}
                 currentUser={currentUser}
                 setShowAuthModal={setShowAuthModal}
+                setShowTradeHistory={setShowTradeHistory}
+                setComments={setComments}
               />
             }
           />

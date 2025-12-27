@@ -12,6 +12,7 @@ const CoinDetails = ({
     comments,
     currentUser,
     setShowAuthModal,
+    setShowTradeHistory,
     setComments
 }) => {
     const { id } = useParams();
